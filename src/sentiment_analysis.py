@@ -1,5 +1,5 @@
 """
-Analisi Sentiment
+Analisi Sentiment - Include supporto XAU/USD
 """
 
 from datetime import datetime
@@ -9,15 +9,21 @@ from .data_providers import FreeDataProvider
 
 
 class SentimentAnalyzer:
-    """Analizzatore sentiment"""
+    """Analizzatore sentiment con supporto oro"""
     
     def __init__(self, pair: str):
-        self.pair = pair.replace("=X", "")
+        self.pair = pair.replace("=X", "").replace("GC=F", "XAUUSD")
+        self.is_gold = "XAU" in self.pair.upper() or "GOLD" in self.pair.upper()
         self.news = []
         
     def analyze_news_sentiment(self) -> dict:
         """Analizza sentiment delle news"""
-        news = FreeDataProvider.fetch_forex_news(self.pair, limit=20)
+        # Per l'oro, cerca anche termini specifici
+        if self.is_gold:
+            news = FreeDataProvider.fetch_forex_news("XAUUSD", limit=25)
+        else:
+            news = FreeDataProvider.fetch_forex_news(self.pair, limit=20)
+        
         self.news = news
         
         if not news:
@@ -39,6 +45,18 @@ class SentimentAnalyzer:
                 blob = TextBlob(text)
                 polarity = blob.sentiment.polarity
                 subjectivity = blob.sentiment.subjectivity
+                
+                # Per l'oro, cerca anche parole chiave specifiche
+                if self.is_gold:
+                    text_upper = text.upper()
+                    # Boost per parole chiave bullish oro
+                    if any(word in text_upper for word in ['RALLY', 'SURGE', 'SAFE HAVEN', 'INFLATION HEDGE', 'BULLISH']):
+                        polarity += 0.2
+                    # Boost per parole chiave bearish oro
+                    if any(word in text_upper for word in ['SLUMP', 'DROP', 'DECLINE', 'FED HIKE', 'BEARISH']):
+                        polarity -= 0.2
+                    
+                    polarity = max(-1, min(1, polarity))
                 
                 if polarity > 0.15:
                     sentiment = 'BULLISH'
@@ -68,7 +86,6 @@ class SentimentAnalyzer:
         
         sentiment_counts = Counter([a['sentiment'] for a in analyzed])
         
-        # Overall
         if avg_polarity > 0.1:
             overall = 'BULLISH'
         elif avg_polarity < -0.1:
@@ -86,14 +103,20 @@ class SentimentAnalyzer:
     
     def get_retail_sentiment(self) -> dict:
         """Recupera sentiment retail"""
-        data = FreeDataProvider.get_retail_sentiment(self.pair)
+        if self.is_gold:
+            data = FreeDataProvider.get_retail_sentiment("XAUUSD")
+        else:
+            data = FreeDataProvider.get_retail_sentiment(self.pair)
         return data
     
     def get_cot_analysis(self) -> dict:
         """Analisi COT data"""
         cot_data = FreeDataProvider.get_cot_data()
         
-        base = self.pair[:3]
+        if self.is_gold:
+            base = 'XAU'
+        else:
+            base = self.pair[:3]
         
         if base in cot_data:
             data = cot_data[base]
@@ -105,23 +128,22 @@ class SentimentAnalyzer:
                 'non_commercial_short': data['non_commercial_short'],
                 'net_speculative': data['net_speculative'],
                 'bias': data['bias'],
-                'source': 'CFTC Weekly Report'
+                'source': 'CFTC Weekly Report',
+                'is_gold': self.is_gold
             }
         
         return {
             'available': False,
             'currency': base,
-            'note': 'COT data not available for this currency'
+            'note': 'COT data not available for this instrument'
         }
     
     def get_sentiment_score(self) -> dict:
         """Calcola punteggio sentiment complessivo"""
         
-        # 1. News sentiment
         news_analysis = self.analyze_news_sentiment()
         news_score = news_analysis['score']
         
-        # 2. Retail sentiment (contrarian)
         retail = self.get_retail_sentiment()
         
         retail_score = 0
@@ -131,7 +153,6 @@ class SentimentAnalyzer:
             elif retail['contrarian_signal'] == 'BEARISH':
                 retail_score = -0.5
         
-        # 3. COT sentiment (institutional)
         cot = self.get_cot_analysis()
         
         cot_score = 0
@@ -141,15 +162,12 @@ class SentimentAnalyzer:
             elif cot['bias'] == 'BEARISH':
                 cot_score = -0.6
         
-        # Combina con pesi
-        # News: 35%, Retail Contrarian: 30%, COT: 35%
+        # Pesi: News 35%, Retail Contrarian 30%, COT 35%
         final_score = (news_score * 0.35) + (retail_score * 0.30) + (cot_score * 0.35)
         final_score = max(-1, min(1, final_score))
         
-        # Probabilità
         probability_bull = ((final_score + 1) / 2) * 100
         
-        # Direzione
         if final_score > 0.2:
             direction = 'BULLISH'
         elif final_score > 0.05:
@@ -174,5 +192,6 @@ class SentimentAnalyzer:
                 'retail_contrarian': round(retail_score, 3),
                 'cot_institutional': round(cot_score, 3)
             },
+            'is_gold': self.is_gold,
             'data_sources': ['RSS News Feeds', 'MyFxBook', 'CFTC COT']
         }
