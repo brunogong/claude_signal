@@ -1,5 +1,5 @@
 """
-📊 Forex Analysis Pro - Versione Stabile con Rate Limit Handling
+📊 Forex Analysis Pro - Con Notifiche Automatiche
 """
 
 import streamlit as st
@@ -7,11 +7,12 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-from datetime import datetime, timedelta
+from datetime import datetime
 import requests
 import feedparser
 from textblob import TextBlob
 import time
+import hashlib
 
 # ==================== CONFIG ====================
 
@@ -34,6 +35,8 @@ st.markdown("""
     .bullish-signal { background: linear-gradient(135deg, #00C853, #00E676); color: white; }
     .bearish-signal { background: linear-gradient(135deg, #FF1744, #FF5252); color: white; }
     .neutral-signal { background: linear-gradient(135deg, #FFB300, #FFC107); color: black; }
+    .telegram-success { background: #c8e6c9; padding: 1rem; border-radius: 10px; text-align: center; }
+    .telegram-auto { background: #e3f2fd; padding: 0.5rem; border-radius: 5px; font-size: 0.8rem; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -53,9 +56,114 @@ PAIRS = {
     "GC=F": "🥇 XAU/USD (Gold)",
 }
 
+# ==================== TELEGRAM CONFIG ====================
+
+def get_telegram_config():
+    """Legge configurazione Telegram dai secrets (nascosta)"""
+    try:
+        bot_token = st.secrets.get("telegram", {}).get("bot_token", "")
+        chat_id = st.secrets.get("telegram", {}).get("chat_id", "")
+        return bot_token, chat_id
+    except:
+        return "", ""
+
+
+def is_telegram_configured():
+    """Verifica se Telegram è configurato"""
+    bot_token, chat_id = get_telegram_config()
+    return bool(bot_token and chat_id)
+
+
+def send_telegram_notification(signal):
+    """Invia notifica Telegram automatica"""
+    bot_token, chat_id = get_telegram_config()
+    
+    if not bot_token or not chat_id:
+        return False, "Telegram non configurato"
+    
+    try:
+        emoji = "🟢" if signal['action'] == 'LONG' else "🔴"
+        
+        message = f"""
+{emoji} <b>SEGNALE AUTOMATICO</b> {emoji}
+
+📊 <b>{signal['pair']}</b>
+━━━━━━━━━━━━━━━━━━━━
+
+🎯 <b>Azione:</b> {signal['action']}
+💯 <b>Probabilità:</b> {signal['probability']:.1f}%
+📈 <b>Confidenza:</b> {signal['confidence']}
+
+━━━━━━━━━━━━━━━━━━━━
+💰 <b>LIVELLI OPERATIVI</b>
+━━━━━━━━━━━━━━━━━━━━
+
+💵 Entry: <code>{signal['entry']:.5f}</code>
+🛑 Stop Loss: <code>{signal['sl']:.5f}</code>
+✅ TP1: <code>{signal['tp1']:.5f}</code>
+✅ TP2: <code>{signal['tp2']:.5f}</code>
+✅ TP3: <code>{signal['tp3']:.5f}</code>
+
+━━━━━━━━━━━━━━━━━━━━
+📐 <b>POSITION SIZING</b>
+━━━━━━━━━━━━━━━━━━━━
+
+📏 Lotti: <b>{signal['lots']}</b>
+💵 Rischio: ${signal['risk_amount']}
+📊 R/R: {signal['rr']}
+
+━━━━━━━━━━━━━━━━━━━━
+📊 <b>ANALISI</b>
+━━━━━━━━━━━━━━━━━━━━
+
+📈 Tecnica: {signal['tech_dir']}
+💰 Fondamentale: {signal['fund_dir']}
+💭 Sentiment: {signal['sent_dir']}
+
+⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+
+<i>🤖 Segnale automatico - Non è un consiglio finanziario</i>
+"""
+        
+        url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+        response = requests.post(url, json={
+            "chat_id": chat_id,
+            "text": message,
+            "parse_mode": "HTML"
+        }, timeout=10)
+        
+        if response.status_code == 200:
+            return True, "OK"
+        else:
+            return False, response.text
+            
+    except Exception as e:
+        return False, str(e)
+
+
+def get_signal_hash(signal):
+    """Genera hash unico per il segnale (evita duplicati)"""
+    unique_str = f"{signal['pair']}_{signal['action']}_{signal['entry']:.5f}_{datetime.now().strftime('%Y-%m-%d-%H')}"
+    return hashlib.md5(unique_str.encode()).hexdigest()
+
+
+def was_signal_already_sent(signal_hash):
+    """Controlla se il segnale è già stato inviato"""
+    if 'sent_signals' not in st.session_state:
+        st.session_state.sent_signals = set()
+    return signal_hash in st.session_state.sent_signals
+
+
+def mark_signal_as_sent(signal_hash):
+    """Marca il segnale come inviato"""
+    if 'sent_signals' not in st.session_state:
+        st.session_state.sent_signals = set()
+    st.session_state.sent_signals.add(signal_hash)
+
+
 # ==================== FUNZIONI DATI ====================
 
-@st.cache_data(ttl=900)  # Cache 15 minuti per evitare rate limit
+@st.cache_data(ttl=900)
 def get_price_data(symbol, period="3mo", interval="1d"):
     """Scarica dati con gestione rate limit"""
     import yfinance as yf
@@ -67,21 +175,17 @@ def get_price_data(symbol, period="3mo", interval="1d"):
             ticker = yf.Ticker(symbol)
             df = ticker.history(period=period, interval=interval)
             
-            if df.empty:
-                # Prova simbolo alternativo per l'oro
-                if symbol == "GC=F":
-                    ticker = yf.Ticker("XAUUSD=X")
-                    df = ticker.history(period=period, interval=interval)
+            if df.empty and symbol == "GC=F":
+                ticker = yf.Ticker("XAUUSD=X")
+                df = ticker.history(period=period, interval=interval)
             
             if not df.empty:
                 return df
                 
         except Exception as e:
             error_msg = str(e).lower()
-            
             if "rate" in error_msg or "too many" in error_msg:
-                wait_time = (attempt + 1) * 10  # 10, 20, 30 secondi
-                time.sleep(wait_time)
+                time.sleep((attempt + 1) * 10)
                 continue
             else:
                 return None
@@ -90,13 +194,12 @@ def get_price_data(symbol, period="3mo", interval="1d"):
 
 
 def calculate_indicators(df):
-    """Calcola indicatori tecnici manualmente (senza libreria ta per evitare problemi)"""
-    
+    """Calcola indicatori tecnici"""
     close = df['Close']
     high = df['High']
     low = df['Low']
     
-    # RSI (14)
+    # RSI
     delta = close.diff()
     gain = delta.where(delta > 0, 0).rolling(window=14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
@@ -134,7 +237,7 @@ def calculate_indicators(df):
     df['Stoch_K'] = ((close - low_14) / (high_14 - low_14)) * 100
     df['Stoch_D'] = df['Stoch_K'].rolling(window=3).mean()
     
-    # ADX (semplificato)
+    # ADX
     plus_dm = high.diff()
     minus_dm = low.diff().abs()
     plus_dm = plus_dm.where((plus_dm > minus_dm) & (plus_dm > 0), 0)
@@ -144,7 +247,7 @@ def calculate_indicators(df):
     plus_di = 100 * (plus_dm.rolling(14).mean() / atr_14)
     minus_di = 100 * (minus_dm.rolling(14).mean() / atr_14)
     
-    dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di)
+    dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di + 0.0001)
     df['ADX'] = dx.rolling(14).mean()
     df['ADX_pos'] = plus_di
     df['ADX_neg'] = minus_di
@@ -157,7 +260,6 @@ def get_technical_score(df):
     current = df.iloc[-1]
     score = 0
     
-    # RSI
     rsi = current['RSI']
     if pd.isna(rsi):
         rsi = 50
@@ -177,7 +279,6 @@ def get_technical_score(df):
     else:
         rsi_status = "Neutral"
     
-    # MACD
     macd = current['MACD']
     macd_signal = current['MACD_Signal']
     
@@ -187,21 +288,18 @@ def get_technical_score(df):
         else:
             score -= 0.5
     
-    # EMA Trend
     if not pd.isna(current['EMA_9']) and not pd.isna(current['EMA_21']):
         if current['Close'] > current['EMA_21'] > current['EMA_50']:
             score += 0.5
         elif current['Close'] < current['EMA_21'] < current['EMA_50']:
             score -= 0.5
     
-    # Bollinger
     if not pd.isna(current['BB_Lower']) and not pd.isna(current['BB_Upper']):
         if current['Close'] < current['BB_Lower']:
             score += 0.5
         elif current['Close'] > current['BB_Upper']:
             score -= 0.5
     
-    # Stochastic
     stoch_k = current['Stoch_K']
     if not pd.isna(stoch_k):
         if stoch_k < 20:
@@ -209,7 +307,6 @@ def get_technical_score(df):
         elif stoch_k > 80:
             score -= 0.3
     
-    # Normalizza score tra -1 e 1
     score = max(-1, min(1, score / 2.5))
     
     return {
@@ -224,62 +321,42 @@ def get_technical_score(df):
 
 
 def get_fundamental_score(pair):
-    """Score fondamentale basato su tassi di interesse"""
-    
-    # Tassi banche centrali aggiornati (Gennaio 2025)
+    """Score fondamentale"""
     rates = {
-        'USD': 5.50,
-        'EUR': 4.50,
-        'GBP': 5.25,
-        'JPY': 0.25,
-        'CHF': 1.00,
-        'AUD': 4.35,
-        'CAD': 3.75,
-        'NZD': 4.75,
-        'XAU': 0  # Oro
+        'USD': 5.50, 'EUR': 4.50, 'GBP': 5.25, 'JPY': 0.25,
+        'CHF': 1.00, 'AUD': 4.35, 'CAD': 3.75, 'NZD': 4.75, 'XAU': 0
     }
     
     pair_clean = pair.replace("=X", "").replace("GC=F", "XAUUSD")
     
     if "XAU" in pair_clean or "GOLD" in pair_clean.upper():
-        # Per l'oro: tassi USD alti = bearish per oro
         usd_rate = rates['USD']
-        if usd_rate > 5:
-            score = -0.3
-        elif usd_rate < 3:
-            score = 0.4
-        else:
-            score = 0
-        
+        score = -0.3 if usd_rate > 5 else (0.4 if usd_rate < 3 else 0)
         return {
             'score': round(score, 3),
             'direction': 'BULLISH' if score > 0.1 else ('BEARISH' if score < -0.1 else 'NEUTRAL'),
-            'info': f"USD Rate: {usd_rate}% (Alto = negativo per oro)"
+            'info': f"USD Rate: {usd_rate}%"
         }
     else:
         base = pair_clean[:3]
         quote = pair_clean[3:6]
-        
         base_rate = rates.get(base, 0)
         quote_rate = rates.get(quote, 0)
         diff = base_rate - quote_rate
-        
         score = min(1, max(-1, diff / 5))
         
         return {
             'score': round(score, 3),
             'direction': 'BULLISH' if score > 0.1 else ('BEARISH' if score < -0.1 else 'NEUTRAL'),
-            'info': f"{base}: {base_rate}% | {quote}: {quote_rate}% | Diff: {diff:+.2f}%"
+            'info': f"{base}: {base_rate}% | {quote}: {quote_rate}%"
         }
 
 
-@st.cache_data(ttl=1800)  # Cache 30 minuti per news
+@st.cache_data(ttl=1800)
 def get_news_sentiment(pair):
-    """Analizza sentiment news"""
+    """Sentiment news"""
     try:
-        feeds = [
-            "https://www.forexlive.com/feed/",
-        ]
+        feed = feedparser.parse("https://www.forexlive.com/feed/")
         
         pair_clean = pair.replace("=X", "").replace("GC=F", "GOLD")
         
@@ -293,38 +370,20 @@ def get_news_sentiment(pair):
         all_news = []
         polarities = []
         
-        for feed_url in feeds:
-            try:
-                feed = feedparser.parse(feed_url)
-                
-                for entry in feed.entries[:20]:
-                    title = entry.get('title', '')
-                    summary = entry.get('summary', '')[:200]
-                    text = title + ' ' + summary
-                    
-                    # Filtra per termini rilevanti
-                    if any(t.upper() in text.upper() for t in terms if t):
-                        blob = TextBlob(text)
-                        pol = blob.sentiment.polarity
-                        polarities.append(pol)
-                        
-                        sentiment = 'BULLISH' if pol > 0.1 else ('BEARISH' if pol < -0.1 else 'NEUTRAL')
-                        
-                        all_news.append({
-                            'title': title[:70],
-                            'polarity': round(pol, 2),
-                            'sentiment': sentiment
-                        })
-            except:
-                continue
+        for entry in feed.entries[:20]:
+            title = entry.get('title', '')
+            summary = entry.get('summary', '')[:200]
+            text = title + ' ' + summary
+            
+            if any(t.upper() in text.upper() for t in terms if t):
+                blob = TextBlob(text)
+                pol = blob.sentiment.polarity
+                polarities.append(pol)
+                sentiment = 'BULLISH' if pol > 0.1 else ('BEARISH' if pol < -0.1 else 'NEUTRAL')
+                all_news.append({'title': title[:70], 'polarity': round(pol, 2), 'sentiment': sentiment})
         
         if not polarities:
-            return {
-                'score': 0,
-                'direction': 'NEUTRAL',
-                'news': [],
-                'count': 0
-            }
+            return {'score': 0, 'direction': 'NEUTRAL', 'news': [], 'count': 0}
         
         avg = sum(polarities) / len(polarities)
         
@@ -335,13 +394,8 @@ def get_news_sentiment(pair):
             'count': len(all_news)
         }
         
-    except Exception as e:
-        return {
-            'score': 0,
-            'direction': 'NEUTRAL',
-            'news': [],
-            'error': str(e)
-        }
+    except:
+        return {'score': 0, 'direction': 'NEUTRAL', 'news': [], 'count': 0}
 
 
 def calculate_entry_points(df, direction):
@@ -350,7 +404,7 @@ def calculate_entry_points(df, direction):
     atr = df['ATR'].iloc[-1]
     
     if pd.isna(atr):
-        atr = current * 0.01  # Fallback: 1% del prezzo
+        atr = current * 0.01
     
     if 'BULLISH' in direction or 'BUY' in direction:
         entry = current
@@ -375,152 +429,54 @@ def calculate_entry_points(df, direction):
     rr = abs(tp1 - entry) / risk if risk > 0 else 0
     
     return {
-        'entry': entry,
-        'stop_loss': sl,
-        'tp1': tp1,
-        'tp2': tp2,
-        'tp3': tp3,
-        'risk_reward': round(rr, 2),
-        'atr': atr
+        'entry': entry, 'stop_loss': sl, 'tp1': tp1, 'tp2': tp2, 'tp3': tp3,
+        'risk_reward': round(rr, 2), 'atr': atr
     }
 
 
 def calculate_lots(balance, risk_pct, entry, sl, pair):
-    """Calcola lotti ottimali"""
+    """Calcola lotti"""
     risk_amount = balance * (risk_pct / 100)
-    
     pip_distance = abs(entry - sl)
     
-    # Calcola pip value
     if "JPY" in pair:
-        pip_distance = pip_distance * 100  # JPY pairs
-        pip_value = 1000 / entry  # Circa $9.25 per USD/JPY
+        pip_distance = pip_distance * 100
+        pip_value = 1000 / entry
     elif "XAU" in pair or "GC=F" in pair:
-        # Oro: 1 lotto = 100 oz
         dollar_risk_per_lot = pip_distance * 100
         lots = risk_amount / dollar_risk_per_lot if dollar_risk_per_lot > 0 else 0
         return {
-            'lots': round(lots, 2),
-            'mini_lots': round(lots * 10, 2),
-            'micro_lots': round(lots * 100, 2),
-            'risk_amount': round(risk_amount, 2),
-            'units': round(lots * 100, 1)  # Oz di oro
+            'lots': round(lots, 2), 'mini_lots': round(lots * 10, 2),
+            'micro_lots': round(lots * 100, 2), 'risk_amount': round(risk_amount, 2)
         }
     else:
-        pip_distance = pip_distance * 10000  # Standard pairs
-        pip_value = 10  # $10 per pip per lotto standard
+        pip_distance = pip_distance * 10000
+        pip_value = 10
     
     if pip_distance <= 0:
-        return {
-            'lots': 0,
-            'mini_lots': 0,
-            'micro_lots': 0,
-            'risk_amount': round(risk_amount, 2)
-        }
+        return {'lots': 0, 'mini_lots': 0, 'micro_lots': 0, 'risk_amount': round(risk_amount, 2)}
     
     lots = risk_amount / (pip_distance * pip_value)
     
     return {
-        'lots': round(lots, 2),
-        'mini_lots': round(lots * 10, 2),
-        'micro_lots': round(lots * 100, 2),
-        'risk_amount': round(risk_amount, 2),
-        'pips': round(pip_distance, 1)
+        'lots': round(lots, 2), 'mini_lots': round(lots * 10, 2),
+        'micro_lots': round(lots * 100, 2), 'risk_amount': round(risk_amount, 2)
     }
 
 
-def send_telegram(signal, bot_token, chat_id):
-    """Invia notifica Telegram"""
-    if not bot_token or not chat_id:
-        return False, "Token o Chat ID mancante"
-    
-    try:
-        emoji = "🟢" if signal['action'] == 'LONG' else ("🔴" if signal['action'] == 'SHORT' else "🟡")
-        
-        message = f"""
-{emoji} <b>SEGNALE FOREX</b> {emoji}
-
-📊 <b>{signal['pair']}</b>
-━━━━━━━━━━━━━━━━━━━━
-
-🎯 <b>Azione:</b> {signal['action']}
-💯 <b>Probabilità:</b> {signal['probability']:.1f}%
-📈 <b>Confidenza:</b> {signal['confidence']}
-
-━━━━━━━━━━━━━━━━━━━━
-💰 <b>LIVELLI OPERATIVI</b>
-━━━━━━━━━━━━━━━━━━━━
-
-💵 Entry: <code>{signal['entry']:.5f}</code>
-🛑 Stop Loss: <code>{signal['sl']:.5f}</code>
-✅ TP1: <code>{signal['tp1']:.5f}</code>
-✅ TP2: <code>{signal['tp2']:.5f}</code>
-✅ TP3: <code>{signal['tp3']:.5f}</code>
-
-━━━━━━━━━━━━━━━━━━━━
-📐 <b>POSITION SIZING</b>
-━━━━━━━━━━━━━━━━━━━━
-
-📏 Lotti: <b>{signal['lots']}</b>
-💵 Rischio: ${signal['risk_amount']}
-📊 R/R: {signal['rr']}
-
-━━━━━━━━━━━━━━━━━━━━
-📊 <b>ANALISI</b>
-━━━━━━━━━━━━━━━━━━━━
-
-📈 Tecnica: {signal['tech_dir']}
-💰 Fondamentale: {signal['fund_dir']}
-💭 Sentiment: {signal['sent_dir']}
-
-⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-
-<i>⚠️ Non è un consiglio finanziario</i>
-"""
-        
-        url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-        response = requests.post(url, json={
-            "chat_id": chat_id,
-            "text": message,
-            "parse_mode": "HTML"
-        }, timeout=10)
-        
-        if response.status_code == 200:
-            return True, "OK"
-        else:
-            return False, response.text
-            
-    except Exception as e:
-        return False, str(e)
-
-
-# ==================== INTERFACCIA PRINCIPALE ====================
+# ==================== MAIN APP ====================
 
 def main():
     st.title("📊 Forex Analysis Pro")
-    st.caption("Analisi Tecnica, Fondamentale e Sentiment | Dati in tempo reale")
+    st.caption("Analisi Tecnica, Fondamentale e Sentiment | Notifiche Telegram Automatiche")
     
     # Sidebar
     with st.sidebar:
         st.header("⚙️ Impostazioni")
         
-        pair = st.selectbox(
-            "📈 Coppia", 
-            options=list(PAIRS.keys()), 
-            format_func=lambda x: PAIRS[x]
-        )
-        
-        timeframe = st.selectbox(
-            "⏱️ Timeframe", 
-            ["1d", "1wk", "1mo"],
-            index=0
-        )
-        
-        period = st.selectbox(
-            "📅 Periodo", 
-            ["1mo", "3mo", "6mo", "1y"],
-            index=1
-        )
+        pair = st.selectbox("📈 Coppia", options=list(PAIRS.keys()), format_func=lambda x: PAIRS[x])
+        timeframe = st.selectbox("⏱️ Timeframe", ["1d", "1wk", "1mo"], index=0)
+        period = st.selectbox("📅 Periodo", ["1mo", "3mo", "6mo", "1y"], index=1)
         
         st.divider()
         
@@ -530,25 +486,17 @@ def main():
         
         st.divider()
         
+        # Telegram Status (senza mostrare credenziali)
         st.subheader("📱 Telegram")
         
-        # Leggi da secrets o input manuale
-        try:
-            default_token = st.secrets.get("telegram", {}).get("bot_token", "")
-            default_chat = st.secrets.get("telegram", {}).get("chat_id", "")
-        except:
-            default_token = ""
-            default_chat = ""
-        
-        bot_token = st.text_input("Bot Token", value=default_token, type="password")
-        chat_id = st.text_input("Chat ID", value=default_chat)
-        
-        telegram_enabled = bool(bot_token and chat_id)
-        
-        if telegram_enabled:
-            st.success("✅ Telegram configurato")
+        if is_telegram_configured():
+            st.success("✅ Configurato")
+            st.markdown('<div class="telegram-auto">🤖 Invio automatico attivo</div>', unsafe_allow_html=True)
+            auto_send = st.checkbox("Invia automaticamente", value=True)
         else:
-            st.info("💡 Configura per ricevere notifiche")
+            st.warning("⚠️ Non configurato")
+            st.caption("Aggiungi bot_token e chat_id nei Secrets")
+            auto_send = False
         
         st.divider()
         
@@ -556,22 +504,18 @@ def main():
         
         st.divider()
         st.caption("📡 Dati: Yahoo Finance")
-        st.caption("📰 News: ForexLive")
         st.caption(f"🕐 {datetime.now().strftime('%H:%M:%S')}")
     
     # Main content
     if analyze_btn:
         
-        # Loading
-        with st.spinner("📊 Caricamento dati in corso..."):
+        with st.spinner("📊 Caricamento dati..."):
             df = get_price_data(pair, period, timeframe)
         
         if df is None or df.empty:
-            st.error("❌ Impossibile caricare i dati. Riprova tra qualche minuto (rate limit).")
-            st.info("💡 Yahoo Finance limita le richieste. Attendi 1-2 minuti e riprova.")
+            st.error("❌ Impossibile caricare i dati. Riprova tra qualche minuto.")
             return
         
-        # Calcola indicatori
         with st.spinner("📈 Calcolo indicatori..."):
             df = calculate_indicators(df)
         
@@ -580,39 +524,67 @@ def main():
         fund = get_fundamental_score(pair)
         sent = get_news_sentiment(pair)
         
-        # Score combinato (pesi: Tech 45%, Fund 30%, Sent 25%)
+        # Score combinato
         combined_score = (tech['score'] * 0.45) + (fund['score'] * 0.30) + (sent['score'] * 0.25)
         prob_bull = ((combined_score + 1) / 2) * 100
         
-        # Direzione finale
+        # Direzione
         if combined_score > 0.25:
-            direction = "STRONG BUY"
-            action = "LONG"
-            confidence = "ALTA"
+            direction, action, confidence = "STRONG BUY", "LONG", "ALTA"
         elif combined_score > 0.10:
-            direction = "BUY"
-            action = "LONG"
-            confidence = "MEDIA"
+            direction, action, confidence = "BUY", "LONG", "MEDIA"
         elif combined_score < -0.25:
-            direction = "STRONG SELL"
-            action = "SHORT"
-            confidence = "ALTA"
+            direction, action, confidence = "STRONG SELL", "SHORT", "ALTA"
         elif combined_score < -0.10:
-            direction = "SELL"
-            action = "SHORT"
-            confidence = "MEDIA"
+            direction, action, confidence = "SELL", "SHORT", "MEDIA"
         else:
-            direction = "NEUTRAL"
-            action = "WAIT"
-            confidence = "BASSA"
+            direction, action, confidence = "NEUTRAL", "WAIT", "BASSA"
         
         # Entry points
         entry_data = calculate_entry_points(df, direction)
-        
-        # Lotti
         lot_data = calculate_lots(balance, risk_pct, entry_data['entry'], entry_data['stop_loss'], pair)
         
+        # ==================== AUTO TELEGRAM ====================
+        
+        telegram_sent = False
+        
+        if auto_send and action in ['LONG', 'SHORT'] and is_telegram_configured():
+            signal_data = {
+                'pair': PAIRS[pair],
+                'action': action,
+                'probability': prob_bull if action == 'LONG' else 100 - prob_bull,
+                'confidence': confidence,
+                'entry': entry_data['entry'],
+                'sl': entry_data['stop_loss'],
+                'tp1': entry_data['tp1'],
+                'tp2': entry_data['tp2'],
+                'tp3': entry_data['tp3'],
+                'lots': lot_data['lots'],
+                'risk_amount': lot_data['risk_amount'],
+                'rr': entry_data['risk_reward'],
+                'tech_dir': tech['direction'],
+                'fund_dir': fund['direction'],
+                'sent_dir': sent['direction']
+            }
+            
+            signal_hash = get_signal_hash(signal_data)
+            
+            if not was_signal_already_sent(signal_hash):
+                success, msg = send_telegram_notification(signal_data)
+                if success:
+                    mark_signal_as_sent(signal_hash)
+                    telegram_sent = True
+        
         # ==================== DISPLAY ====================
+        
+        # Telegram notification banner
+        if telegram_sent:
+            st.markdown('''
+            <div class="telegram-success">
+                📱 <b>Notifica inviata automaticamente su Telegram!</b>
+            </div>
+            ''', unsafe_allow_html=True)
+            st.balloons()
         
         # Header metriche
         st.subheader(f"📊 {PAIRS[pair]}")
@@ -672,7 +644,7 @@ def main():
             decimals = 2 if "JPY" in pair or "GC" in pair else 5
             
             levels_df = pd.DataFrame({
-                "Livello": ["📍 Entry", "🛑 Stop Loss", "✅ Take Profit 1", "✅ Take Profit 2", "✅ Take Profit 3"],
+                "Livello": ["📍 Entry", "🛑 Stop Loss", "✅ TP1", "✅ TP2", "✅ TP3"],
                 "Prezzo": [
                     f"{entry_data['entry']:.{decimals}f}",
                     f"{entry_data['stop_loss']:.{decimals}f}",
@@ -698,38 +670,28 @@ def main():
                 st.metric("📦 Micro Lotti", lot_data['micro_lots'])
                 st.metric("💵 Rischio", f"${lot_data['risk_amount']}")
             
-            # Pulsante Telegram
-            if telegram_enabled and action in ['LONG', 'SHORT']:
-                st.divider()
-                if st.button("📱 INVIA SU TELEGRAM", use_container_width=True, type="primary"):
+            # Manual send button (backup)
+            if action in ['LONG', 'SHORT'] and is_telegram_configured() and not telegram_sent:
+                if st.button("📱 Invia Manualmente", use_container_width=True):
                     signal_data = {
-                        'pair': PAIRS[pair],
-                        'action': action,
+                        'pair': PAIRS[pair], 'action': action,
                         'probability': prob_bull if action == 'LONG' else 100 - prob_bull,
-                        'confidence': confidence,
-                        'entry': entry_data['entry'],
-                        'sl': entry_data['stop_loss'],
-                        'tp1': entry_data['tp1'],
-                        'tp2': entry_data['tp2'],
-                        'tp3': entry_data['tp3'],
-                        'lots': lot_data['lots'],
-                        'risk_amount': lot_data['risk_amount'],
-                        'rr': entry_data['risk_reward'],
-                        'tech_dir': tech['direction'],
-                        'fund_dir': fund['direction'],
-                        'sent_dir': sent['direction']
+                        'confidence': confidence, 'entry': entry_data['entry'],
+                        'sl': entry_data['stop_loss'], 'tp1': entry_data['tp1'],
+                        'tp2': entry_data['tp2'], 'tp3': entry_data['tp3'],
+                        'lots': lot_data['lots'], 'risk_amount': lot_data['risk_amount'],
+                        'rr': entry_data['risk_reward'], 'tech_dir': tech['direction'],
+                        'fund_dir': fund['direction'], 'sent_dir': sent['direction']
                     }
-                    
-                    success, msg = send_telegram(signal_data, bot_token, chat_id)
-                    
+                    success, msg = send_telegram_notification(signal_data)
                     if success:
-                        st.success("✅ Notifica inviata su Telegram!")
+                        st.success("✅ Inviato!")
                     else:
                         st.error(f"❌ Errore: {msg}")
         
         st.divider()
         
-        # Breakdown Analisi
+        # Breakdown
         st.subheader("📊 Breakdown Analisi")
         
         col1, col2, col3 = st.columns(3)
@@ -738,29 +700,19 @@ def main():
             st.markdown("**📈 Tecnica** (45%)")
             tech_color = "green" if 'BULLISH' in tech['direction'] else ("red" if 'BEARISH' in tech['direction'] else "gray")
             st.markdown(f"Direzione: :{tech_color}[**{tech['direction']}**]")
-            st.write(f"Score: {tech['score']}")
             st.write(f"RSI: {tech['rsi']} ({tech['rsi_status']})")
-            st.write(f"ADX: {tech['adx']}")
         
         with col2:
             st.markdown("**💰 Fondamentale** (30%)")
             fund_color = "green" if 'BULLISH' in fund['direction'] else ("red" if 'BEARISH' in fund['direction'] else "gray")
             st.markdown(f"Direzione: :{fund_color}[**{fund['direction']}**]")
-            st.write(f"Score: {fund['score']}")
             st.write(f"{fund['info']}")
         
         with col3:
             st.markdown("**💭 Sentiment** (25%)")
             sent_color = "green" if 'BULLISH' in sent['direction'] else ("red" if 'BEARISH' in sent['direction'] else "gray")
             st.markdown(f"Direzione: :{sent_color}[**{sent['direction']}**]")
-            st.write(f"Score: {sent['score']}")
-            st.write(f"News analizzate: {sent.get('count', 0)}")
-            
-            if sent.get('news'):
-                st.markdown("**Ultime news:**")
-                for n in sent['news'][:3]:
-                    emoji = "🟢" if n['sentiment'] == 'BULLISH' else ("🔴" if n['sentiment'] == 'BEARISH' else "⚪")
-                    st.caption(f"{emoji} {n['title']}")
+            st.write(f"News: {sent.get('count', 0)}")
         
         st.divider()
         
@@ -768,73 +720,35 @@ def main():
         st.subheader("📈 Grafico Tecnico")
         
         fig = make_subplots(
-            rows=3, cols=1,
-            shared_xaxes=True,
-            vertical_spacing=0.05,
-            row_heights=[0.6, 0.2, 0.2],
-            subplot_titles=('Prezzo + Indicatori', 'RSI', 'MACD')
+            rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.05,
+            row_heights=[0.6, 0.2, 0.2], subplot_titles=('Prezzo', 'RSI', 'MACD')
         )
         
-        # Candlestick
-        fig.add_trace(
-            go.Candlestick(
-                x=df.index,
-                open=df['Open'],
-                high=df['High'],
-                low=df['Low'],
-                close=df['Close'],
-                name='Prezzo',
-                increasing_line_color='#00C853',
-                decreasing_line_color='#FF1744'
-            ),
-            row=1, col=1
-        )
+        fig.add_trace(go.Candlestick(
+            x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'],
+            name='Prezzo', increasing_line_color='#00C853', decreasing_line_color='#FF1744'
+        ), row=1, col=1)
         
-        # EMA
         fig.add_trace(go.Scatter(x=df.index, y=df['EMA_21'], name='EMA 21', line=dict(color='orange', width=1)), row=1, col=1)
         fig.add_trace(go.Scatter(x=df.index, y=df['EMA_50'], name='EMA 50', line=dict(color='blue', width=1)), row=1, col=1)
+        fig.add_trace(go.Scatter(x=df.index, y=df['BB_Upper'], name='BB', line=dict(color='gray', width=1, dash='dot')), row=1, col=1)
+        fig.add_trace(go.Scatter(x=df.index, y=df['BB_Lower'], showlegend=False, line=dict(color='gray', width=1, dash='dot'), fill='tonexty', fillcolor='rgba(128,128,128,0.1)'), row=1, col=1)
         
-        # Bollinger
-        fig.add_trace(go.Scatter(x=df.index, y=df['BB_Upper'], name='BB Upper', line=dict(color='rgba(128,128,128,0.5)', width=1, dash='dot')), row=1, col=1)
-        fig.add_trace(go.Scatter(x=df.index, y=df['BB_Lower'], name='BB Lower', line=dict(color='rgba(128,128,128,0.5)', width=1, dash='dot'), fill='tonexty', fillcolor='rgba(128,128,128,0.1)'), row=1, col=1)
-        
-        # Livelli Entry/SL/TP
         if action != 'WAIT':
-            fig.add_hline(y=entry_data['entry'], line_dash="solid", line_color="blue", annotation_text="Entry", row=1, col=1)
             fig.add_hline(y=entry_data['stop_loss'], line_dash="dash", line_color="red", annotation_text="SL", row=1, col=1)
             fig.add_hline(y=entry_data['tp1'], line_dash="dash", line_color="green", annotation_text="TP1", row=1, col=1)
-            fig.add_hline(y=entry_data['tp2'], line_dash="dot", line_color="green", annotation_text="TP2", row=1, col=1)
         
-        # RSI
         fig.add_trace(go.Scatter(x=df.index, y=df['RSI'], name='RSI', line=dict(color='purple', width=2)), row=2, col=1)
         fig.add_hline(y=70, line_dash="dash", line_color="red", row=2, col=1)
         fig.add_hline(y=30, line_dash="dash", line_color="green", row=2, col=1)
-        fig.add_hline(y=50, line_dash="dot", line_color="gray", row=2, col=1)
         
-        # MACD
         colors = ['green' if val >= 0 else 'red' for val in df['MACD_Hist'].fillna(0)]
-        fig.add_trace(go.Bar(x=df.index, y=df['MACD_Hist'], name='MACD Hist', marker_color=colors), row=3, col=1)
+        fig.add_trace(go.Bar(x=df.index, y=df['MACD_Hist'], name='Hist', marker_color=colors), row=3, col=1)
         fig.add_trace(go.Scatter(x=df.index, y=df['MACD'], name='MACD', line=dict(color='blue', width=1)), row=3, col=1)
         fig.add_trace(go.Scatter(x=df.index, y=df['MACD_Signal'], name='Signal', line=dict(color='orange', width=1)), row=3, col=1)
         
-        fig.update_layout(
-            height=700,
-            xaxis_rangeslider_visible=False,
-            showlegend=True,
-            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
-        )
-        
+        fig.update_layout(height=700, xaxis_rangeslider_visible=False, showlegend=True)
         st.plotly_chart(fig, use_container_width=True)
-        
-        # Footer
-        st.divider()
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            st.caption("📡 Dati: Yahoo Finance (15 min delay)")
-        with col2:
-            st.caption("📰 News: ForexLive RSS")
-        with col3:
-            st.caption(f"🕐 Ultimo aggiornamento: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
 
 if __name__ == "__main__":
