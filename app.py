@@ -1,149 +1,147 @@
 """
-📊 Forex Analysis Pro
-Analisi completa con XAU/USD, Notifiche Telegram e Calcolo Lotti
+📊 Forex Analysis Pro - Con Debug
 """
 
 import streamlit as st
-import pandas as pd
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
-from datetime import datetime
 
-from src.data_providers import FreeDataProvider
-from src.signal_generator import SignalGenerator
-from src.telegram_notifier import TelegramNotifier, get_telegram_notifier
-from src.lot_calculator import LotCalculator, get_lot_calculator
-
-# ==================== CONFIGURAZIONE ====================
-
+# Debug mode - mostra errori
 st.set_page_config(
     page_title="Forex Analysis Pro",
     page_icon="📊",
-    layout="wide",
-    initial_sidebar_state="expanded"
+    layout="wide"
 )
 
-# CSS
-st.markdown("""
-<style>
-    .main-header {
-        font-size: 2.5rem;
-        font-weight: bold;
-        text-align: center;
-        background: linear-gradient(90deg, #1E88E5, #7C4DFF);
-        -webkit-background-clip: text;
-        -webkit-text-fill-color: transparent;
-        margin-bottom: 1rem;
-    }
-    .signal-box {
-        padding: 2rem;
-        border-radius: 15px;
-        text-align: center;
-        margin: 1rem 0;
-        font-size: 1.5rem;
-        font-weight: bold;
-    }
-    .bullish-signal {
-        background: linear-gradient(135deg, #00C853, #00E676);
-        color: white;
-    }
-    .bearish-signal {
-        background: linear-gradient(135deg, #FF1744, #FF5252);
-        color: white;
-    }
-    .neutral-signal {
-        background: linear-gradient(135deg, #FFB300, #FFC107);
-        color: black;
-    }
-    .gold-badge {
-        background: linear-gradient(135deg, #FFD700, #FFA000);
-        color: black;
-        padding: 0.2rem 0.5rem;
-        border-radius: 5px;
-        font-size: 0.8rem;
-    }
-    .metric-card {
-        background: #f8f9fa;
-        padding: 1rem;
-        border-radius: 10px;
-        border-left: 4px solid #1E88E5;
-    }
-    .telegram-status {
-        padding: 0.5rem;
-        border-radius: 5px;
-        font-size: 0.8rem;
-    }
-    .telegram-ok { background: #c8e6c9; color: #2e7d32; }
-    .telegram-error { background: #ffcdd2; color: #c62828; }
-</style>
-""", unsafe_allow_html=True)
+try:
+    import pandas as pd
+    import numpy as np
+    st.write("✅ pandas, numpy OK")
+except Exception as e:
+    st.error(f"❌ Errore pandas/numpy: {e}")
+    st.stop()
 
-# ==================== COPPIE FOREX + XAU ====================
+try:
+    import yfinance as yf
+    st.write("✅ yfinance OK")
+except Exception as e:
+    st.error(f"❌ Errore yfinance: {e}")
+    st.stop()
 
-FOREX_PAIRS = {
+try:
+    import plotly.graph_objects as go
+    from plotly.subplots import make_subplots
+    st.write("✅ plotly OK")
+except Exception as e:
+    st.error(f"❌ Errore plotly: {e}")
+    st.stop()
+
+try:
+    from ta.trend import MACD, EMAIndicator, ADXIndicator
+    from ta.momentum import RSIIndicator, StochasticOscillator
+    from ta.volatility import BollingerBands, AverageTrueRange
+    st.write("✅ ta (technical analysis) OK")
+except Exception as e:
+    st.error(f"❌ Errore ta: {e}")
+    st.stop()
+
+try:
+    import requests
+    from bs4 import BeautifulSoup
+    import feedparser
+    st.write("✅ requests, beautifulsoup, feedparser OK")
+except Exception as e:
+    st.error(f"❌ Errore requests/bs4/feedparser: {e}")
+    st.stop()
+
+try:
+    from textblob import TextBlob
+    st.write("✅ textblob OK")
+except Exception as e:
+    st.error(f"❌ Errore textblob: {e}")
+    st.stop()
+
+try:
+    from datetime import datetime
+    st.write("✅ datetime OK")
+except Exception as e:
+    st.error(f"❌ Errore datetime: {e}")
+    st.stop()
+
+st.success("🎉 Tutte le librerie caricate correttamente!")
+st.divider()
+
+# ==================== TEST DATI ====================
+
+st.subheader("Test caricamento dati")
+
+try:
+    ticker = yf.Ticker("EURUSD=X")
+    df = ticker.history(period="5d", interval="1d")
+    
+    if df.empty:
+        st.warning("⚠️ DataFrame vuoto per EURUSD")
+    else:
+        st.write(f"✅ Dati EURUSD caricati: {len(df)} righe")
+        st.dataframe(df.tail())
+except Exception as e:
+    st.error(f"❌ Errore caricamento dati: {e}")
+
+st.divider()
+
+# ==================== APP COMPLETA ====================
+
+st.title("📊 Forex Analysis Pro")
+st.caption("Se vedi questo messaggio, l'app funziona!")
+
+# Coppie
+PAIRS = {
     "EURUSD=X": "EUR/USD",
     "GBPUSD=X": "GBP/USD",
     "USDJPY=X": "USD/JPY",
-    "USDCHF=X": "USD/CHF",
-    "AUDUSD=X": "AUD/USD",
-    "USDCAD=X": "USD/CAD",
-    "NZDUSD=X": "NZD/USD",
-    "EURGBP=X": "EUR/GBP",
-    "EURJPY=X": "EUR/JPY",
-    "GBPJPY=X": "GBP/JPY",
-    "EURCHF=X": "EUR/CHF",
-    "AUDJPY=X": "AUD/JPY",
     "GC=F": "🥇 XAU/USD (Gold)",
 }
 
-# ==================== FUNZIONI ====================
-
-@st.cache_data(ttl=300)
-def load_data(pair: str, period: str, interval: str):
-    """Carica dati con cache 5 minuti"""
-    if pair == "GC=F" or "XAU" in pair.upper():
-        return FreeDataProvider.get_gold_data(period, interval)
-    return FreeDataProvider.get_forex_data(pair, period, interval)
-
-
-def send_telegram_notification(signal_data: dict, notifier: TelegramNotifier) -> bool:
-    """Invia notifica Telegram"""
-    if not notifier.is_configured():
-        return False
+# Sidebar
+with st.sidebar:
+    st.header("⚙️ Impostazioni")
+    pair = st.selectbox("Coppia", options=list(PAIRS.keys()), format_func=lambda x: PAIRS[x])
     
-    if not signal_data.get('recommendation', {}).get('should_notify', False):
-        return False
-    
-    return notifier.send_trading_signal(signal_data)
-
-
-def create_price_chart(df, signal_data):
-    """Crea grafico prezzi"""
-    
-    fig = make_subplots(
-        rows=4, cols=1,
-        shared_xaxes=True,
-        vertical_spacing=0.03,
-        row_heights=[0.5, 0.17, 0.17, 0.16],
-        subplot_titles=('Prezzo', 'RSI', 'MACD', 'Volume')
-    )
-    
-    # Candlestick
-    fig.add_trace(
-        go.Candlestick(
-            x=df.index,
-            open=df['Open'],
-            high=df['High'],
-            low=df['Low'],
-            close=df['Close'],
-            name='Price',
-            increasing_line_color='#00C853',
-            decreasing_line_color='#FF1744'
-        ),
-        row=1, col=1
-    )
-    
-    # Indicatori dal technical analyzer
-    analyzer = signal_data.get('_analyzer')
-    if analyzer and hasattr(analyzer, 'df'):
-        adf = analyzer.df
+    if st.button("🔍 Test Analisi", type="primary"):
+        with st.spinner("Caricamento..."):
+            try:
+                ticker = yf.Ticker(pair)
+                df = ticker.history(period="1mo", interval="1d")
+                
+                if df.empty:
+                    st.error("Nessun dato disponibile")
+                else:
+                    st.success(f"Caricati {len(df)} dati per {PAIRS[pair]}")
+                    
+                    # Calcola RSI semplice
+                    close = df['Close']
+                    delta = close.diff()
+                    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+                    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+                    rs = gain / loss
+                    rsi = 100 - (100 / (1 + rs))
+                    
+                    current_price = close.iloc[-1]
+                    current_rsi = rsi.iloc[-1]
+                    
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        st.metric("Prezzo", f"{current_price:.4f}")
+                    with col2:
+                        st.metric("RSI", f"{current_rsi:.1f}")
+                    
+                    # Segnale
+                    if current_rsi < 30:
+                        st.success("🟢 OVERSOLD - Possibile BUY")
+                    elif current_rsi > 70:
+                        st.error("🔴 OVERBOUGHT - Possibile SELL")
+                    else:
+                        st.info("🟡 NEUTRALE")
+                        
+            except Exception as e:
+                st.error(f"Errore: {e}")
+                import traceback
+                st.code(traceback.format_exc())
