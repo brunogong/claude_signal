@@ -10,3 +10,4 @@ feedparser
 textblob
 lxml
 scipy
+python-telegram-bot
