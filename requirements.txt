@@ -3,13 +3,10 @@ pandas
 numpy
 yfinance
 plotly
+ta
 requests
 beautifulsoup4
 feedparser
-python-dateutil
-scipy
-scikit-learn
-lxml
 textblob
-ta
-investing-com-api
+lxml
+scipy
