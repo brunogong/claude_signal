@@ -1,17 +1,28 @@
-streamlit==1.29.0
-pandas==2.1.3
-numpy==1.26.2
-yfinance==0.2.33
-ta==0.11.0
-plotly==5.18.0
-requests==2.31.0
-beautifulsoup4==4.12.2
-textblob==0.17.1
-feedparser==6.0.10
-newspaper3k==0.2.8
-transformers==4.35.2
-torch==2.1.1
-scipy==1.11.4
-scikit-learn==1.3.2
-lxml==4.9.3
-python-dateutil==2.8.2
+# Core
+streamlit
+pandas
+numpy
+yfinance
+plotly
+requests
+beautifulsoup4
+feedparser
+python-dateutil
+scipy
+scikit-learn
+lxml
+
+# Analisi testo (leggero)
+textblob
+
+# Indicatori tecnici
+ta
+
+# Utils
+textblob
+
+# NOTA: torch e transformers sono commentati perché troppo pesanti per il deploy gratuito
+# Se vuoi usarli, decommenta ma il deploy potrebbe fallire per timeout/memory
+# torch
+# transformers
+# newspaper3k
