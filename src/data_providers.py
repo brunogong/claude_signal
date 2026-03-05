@@ -1,6 +1,7 @@
 """
 Provider Dati - 100% Gratuito
 Fonti: Yahoo Finance, RSS Feeds, CFTC, MyFxBook
+Include XAU/USD (Oro)
 """
 
 import requests
@@ -16,15 +17,47 @@ import time
 class FreeDataProvider:
     """Provider dati completamente gratuito"""
     
+    # Coppie supportate incluso XAU/USD
+    SUPPORTED_PAIRS = {
+        "EURUSD=X": {"name": "EUR/USD", "type": "forex", "pip": 0.0001},
+        "GBPUSD=X": {"name": "GBP/USD", "type": "forex", "pip": 0.0001},
+        "USDJPY=X": {"name": "USD/JPY", "type": "forex", "pip": 0.01},
+        "USDCHF=X": {"name": "USD/CHF", "type": "forex", "pip": 0.0001},
+        "AUDUSD=X": {"name": "AUD/USD", "type": "forex", "pip": 0.0001},
+        "USDCAD=X": {"name": "USD/CAD", "type": "forex", "pip": 0.0001},
+        "NZDUSD=X": {"name": "NZD/USD", "type": "forex", "pip": 0.0001},
+        "EURGBP=X": {"name": "EUR/GBP", "type": "forex", "pip": 0.0001},
+        "EURJPY=X": {"name": "EUR/JPY", "type": "forex", "pip": 0.01},
+        "GBPJPY=X": {"name": "GBP/JPY", "type": "forex", "pip": 0.01},
+        "EURCHF=X": {"name": "EUR/CHF", "type": "forex", "pip": 0.0001},
+        "AUDJPY=X": {"name": "AUD/JPY", "type": "forex", "pip": 0.01},
+        "GC=F": {"name": "XAU/USD (Gold)", "type": "commodity", "pip": 0.01},
+        "XAUUSD=X": {"name": "XAU/USD", "type": "commodity", "pip": 0.01},
+    }
+    
     @staticmethod
     def get_forex_data(symbol: str, period: str = "3mo", interval: str = "1h") -> pd.DataFrame:
         """
-        Scarica dati forex da Yahoo Finance
+        Scarica dati forex/commodity da Yahoo Finance
         ✅ GRATUITO illimitato
         """
+        # Mappa simboli alternativi per l'oro
+        symbol_map = {
+            "XAUUSD=X": "GC=F",  # Gold Futures
+            "XAUUSD": "GC=F",
+        }
+        
+        actual_symbol = symbol_map.get(symbol, symbol)
+        
         try:
-            ticker = yf.Ticker(symbol)
+            ticker = yf.Ticker(actual_symbol)
             df = ticker.history(period=period, interval=interval)
+            
+            if df.empty:
+                # Prova simbolo alternativo per l'oro
+                if "XAU" in symbol.upper() or "GOLD" in symbol.upper():
+                    ticker = yf.Ticker("GC=F")
+                    df = ticker.history(period=period, interval=interval)
             
             if df.empty:
                 return None
@@ -37,37 +70,30 @@ class FreeDataProvider:
             return None
     
     @staticmethod
-    def get_multiple_timeframes(symbol: str) -> dict:
-        """Scarica dati su più timeframe"""
-        timeframes = {
-            '1h': ('5d', '1h'),
-            '4h': ('1mo', '1h'),  # Yahoo non ha 4h, useremo 1h e resample
-            '1d': ('6mo', '1d'),
-            '1wk': ('2y', '1wk')
-        }
+    def get_gold_data(period: str = "3mo", interval: str = "1h") -> pd.DataFrame:
+        """
+        Scarica specificamente dati oro
+        Prova più simboli per maggiore affidabilità
+        """
+        symbols = ["GC=F", "XAUUSD=X", "^XAUUSD"]
         
-        data = {}
-        for tf, (period, interval) in timeframes.items():
-            df = FreeDataProvider.get_forex_data(symbol, period, interval)
-            if df is not None:
-                if tf == '4h' and interval == '1h':
-                    # Resample a 4h
-                    df = df.resample('4H').agg({
-                        'Open': 'first',
-                        'High': 'max',
-                        'Low': 'min',
-                        'Close': 'last',
-                        'Volume': 'sum'
-                    }).dropna()
-                data[tf] = df
+        for symbol in symbols:
+            try:
+                ticker = yf.Ticker(symbol)
+                df = ticker.history(period=period, interval=interval)
+                
+                if not df.empty:
+                    df.index = pd.to_datetime(df.index)
+                    return df
+            except:
+                continue
         
-        return data
+        return None
     
     @staticmethod
     def get_central_bank_rates() -> dict:
         """
         Tassi banche centrali aggiornati
-        Fonte: Dati ufficiali banche centrali
         Ultimo aggiornamento: Gennaio 2025
         """
         return {
@@ -126,13 +152,21 @@ class FreeDataProvider:
                 'last_change': '2024-10-09',
                 'next_meeting': '2025-02-19',
                 'trend': 'cutting'
+            },
+            'XAU': {
+                'rate': 0,
+                'bank': 'N/A - Commodity',
+                'last_change': 'N/A',
+                'next_meeting': 'N/A',
+                'trend': 'N/A',
+                'note': 'Gold - influenced by USD rates and inflation'
             }
         }
     
     @staticmethod
     def fetch_forex_news(pair: str = None, limit: int = 25) -> list:
         """
-        Recupera news forex da RSS feeds gratuiti
+        Recupera news forex/gold da RSS feeds gratuiti
         ✅ GRATUITO illimitato
         """
         feeds = [
@@ -155,6 +189,11 @@ class FreeDataProvider:
                 'name': 'Investing.com',
                 'url': 'https://www.investing.com/rss/news_301.rss',
                 'priority': 3
+            },
+            {
+                'name': 'Kitco Gold',
+                'url': 'https://www.kitco.com/rss/gold.rss',
+                'priority': 1  # Priorità alta per notizie sull'oro
             }
         ]
         
@@ -165,7 +204,6 @@ class FreeDataProvider:
                 parsed = feedparser.parse(feed['url'])
                 
                 for entry in parsed.entries[:15]:
-                    # Pulisci HTML
                     summary = entry.get('summary', '')
                     if summary:
                         soup = BeautifulSoup(summary, 'html.parser')
@@ -186,24 +224,27 @@ class FreeDataProvider:
                 print(f"Errore feed {feed['name']}: {e}")
                 continue
         
-        # Ordina per priorità
         all_news.sort(key=lambda x: x['priority'])
         
         # Filtra per coppia se specificata
         if pair:
-            pair_clean = pair.replace("=X", "").replace("/", "")
-            base = pair_clean[:3]
-            quote = pair_clean[3:6]
+            pair_clean = pair.replace("=X", "").replace("/", "").replace("GC=F", "XAUUSD")
             
-            search_terms = [
-                pair_clean, 
-                f"{base}/{quote}",
-                f"{base}/{quote}".lower(),
-                base, 
-                quote,
-                base.lower(),
-                quote.lower()
-            ]
+            # Termini di ricerca specifici per tipo
+            if "XAU" in pair_clean.upper() or pair == "GC=F":
+                search_terms = ['GOLD', 'XAU', 'ORO', 'PRECIOUS', 'METAL', 'BULLION', 'GOLD PRICE']
+            else:
+                base = pair_clean[:3]
+                quote = pair_clean[3:6]
+                search_terms = [
+                    pair_clean, 
+                    f"{base}/{quote}",
+                    f"{base}/{quote}".lower(),
+                    base, 
+                    quote,
+                    base.lower(),
+                    quote.lower()
+                ]
             
             filtered = []
             for news in all_news:
@@ -220,11 +261,11 @@ class FreeDataProvider:
     def get_economic_calendar() -> list:
         """
         Calendario economico da fonti gratuite
+        Include eventi rilevanti per l'oro
         """
         events = []
         
         try:
-            # Prova API gratuita di nfsfaireconomy (mirror di ForexFactory)
             url = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
             headers = {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
@@ -251,8 +292,21 @@ class FreeDataProvider:
             
         except Exception as e:
             print(f"Errore calendario: {e}")
-            # Fallback con eventi importanti standard
             events = FreeDataProvider._get_standard_events()
+        
+        # Aggiungi eventi specifici per l'oro
+        gold_events = [
+            e for e in events 
+            if any(term in e.get('event', '').upper() 
+                   for term in ['CPI', 'INFLATION', 'FED', 'FOMC', 'INTEREST RATE', 'NFP', 'NON-FARM'])
+        ]
+        
+        # Marca gli eventi rilevanti per l'oro
+        for e in events:
+            e['gold_relevant'] = any(
+                term in e.get('event', '').upper() 
+                for term in ['CPI', 'INFLATION', 'FED', 'FOMC', 'INTEREST RATE', 'NFP', 'GDP']
+            )
         
         return events
     
@@ -272,7 +326,7 @@ class FreeDataProvider:
         Sentiment retail da MyFxBook
         ✅ GRATUITO
         """
-        pair_clean = pair.replace("=X", "").replace("/", "").upper()
+        pair_clean = pair.replace("=X", "").replace("/", "").replace("GC=F", "XAUUSD").upper()
         
         try:
             headers = {
@@ -287,7 +341,6 @@ class FreeDataProvider:
             if response.status_code == 200:
                 soup = BeautifulSoup(response.text, 'html.parser')
                 
-                # Cerca tabella outlook
                 tables = soup.find_all('table')
                 
                 for table in tables:
@@ -301,16 +354,15 @@ class FreeDataProvider:
                                 cell_text = cells[0].get_text().strip()
                                 row_pair = cell_text.replace('/', '').replace(' ', '').upper()
                                 
-                                # Match flessibile
+                                # Match per forex e oro
                                 if (pair_clean in row_pair or 
                                     row_pair in pair_clean or
-                                    pair_clean[:6] == row_pair[:6]):
+                                    pair_clean[:6] == row_pair[:6] or
+                                    ('XAU' in pair_clean and 'GOLD' in row_pair.upper())):
                                     
-                                    # Estrai percentuali
                                     long_text = cells[1].get_text().strip()
                                     short_text = cells[2].get_text().strip()
                                     
-                                    # Rimuovi % e converti
                                     long_match = re.search(r'(\d+\.?\d*)', long_text)
                                     short_match = re.search(r'(\d+\.?\d*)', short_text)
                                     
@@ -318,7 +370,6 @@ class FreeDataProvider:
                                         long_pct = float(long_match.group(1))
                                         short_pct = float(short_match.group(1))
                                         
-                                        # Segnale contrarian
                                         if long_pct > 65:
                                             contrarian = 'BEARISH'
                                         elif long_pct < 35:
@@ -341,7 +392,6 @@ class FreeDataProvider:
         except Exception as e:
             print(f"Errore MyFxBook: {e}")
         
-        # Fallback stimato
         return {
             'pair': pair_clean,
             'long_percent': 50,
@@ -356,13 +406,11 @@ class FreeDataProvider:
     def get_cot_data() -> dict:
         """
         COT Data dalla CFTC
-        ✅ GRATUITO - Dati ufficiali US Government
-        Aggiornato ogni martedì
+        ✅ GRATUITO - Include Gold futures
         """
         cot_data = {}
         
         try:
-            # URL report COT futures
             url = "https://www.cftc.gov/dea/newcot/deafut.txt"
             
             response = requests.get(url, timeout=20)
@@ -370,8 +418,8 @@ class FreeDataProvider:
             if response.status_code == 200:
                 lines = response.text.split('\n')
                 
-                # Mapping futures forex su CME
-                forex_futures = {
+                # Mapping futures incluso oro
+                futures_map = {
                     'EURO FX': 'EUR',
                     'BRITISH POUND': 'GBP',
                     'JAPANESE YEN': 'JPY',
@@ -379,52 +427,60 @@ class FreeDataProvider:
                     'AUSTRALIAN DOLLAR': 'AUD',
                     'CANADIAN DOLLAR': 'CAD',
                     'NZ DOLLAR': 'NZD',
+                    'GOLD': 'XAU',  # Oro!
+                    'SILVER': 'XAG',
                     'MEXICAN PESO': 'MXN'
                 }
                 
                 for line in lines:
                     line_upper = line.upper()
                     
-                    for futures_name, currency in forex_futures.items():
-                        if futures_name in line_upper and 'CHICAGO' in line_upper:
-                            parts = line.split(',')
-                            
-                            if len(parts) > 12:
-                                try:
-                                    # Non-commercial (speculatori/hedge funds)
-                                    nc_long = int(parts[4].strip() or 0)
-                                    nc_short = int(parts[5].strip() or 0)
-                                    
-                                    # Commercial (hedgers)
-                                    c_long = int(parts[8].strip() or 0)
-                                    c_short = int(parts[9].strip() or 0)
-                                    
-                                    # Net positions
-                                    net_speculative = nc_long - nc_short
-                                    net_commercial = c_long - c_short
-                                    
-                                    # Determina bias
-                                    if net_speculative > 10000:
-                                        bias = 'BULLISH'
-                                    elif net_speculative < -10000:
-                                        bias = 'BEARISH'
-                                    else:
-                                        bias = 'NEUTRAL'
-                                    
-                                    cot_data[currency] = {
-                                        'non_commercial_long': nc_long,
-                                        'non_commercial_short': nc_short,
-                                        'commercial_long': c_long,
-                                        'commercial_short': c_short,
-                                        'net_speculative': net_speculative,
-                                        'net_commercial': net_commercial,
-                                        'bias': bias,
-                                        'source': 'CFTC'
-                                    }
-                                    
-                                except ValueError:
-                                    continue
-                            break
+                    for futures_name, currency in futures_map.items():
+                        if futures_name in line_upper:
+                            # Per forex cerca CHICAGO, per metalli cerca COMEX
+                            if ('CHICAGO' in line_upper or 
+                                'COMEX' in line_upper or 
+                                futures_name in ['GOLD', 'SILVER']):
+                                
+                                parts = line.split(',')
+                                
+                                if len(parts) > 12:
+                                    try:
+                                        nc_long = int(parts[4].strip() or 0)
+                                        nc_short = int(parts[5].strip() or 0)
+                                        c_long = int(parts[8].strip() or 0)
+                                        c_short = int(parts[9].strip() or 0)
+                                        
+                                        net_speculative = nc_long - nc_short
+                                        net_commercial = c_long - c_short
+                                        
+                                        # Soglie diverse per oro vs forex
+                                        if currency == 'XAU':
+                                            threshold = 50000
+                                        else:
+                                            threshold = 10000
+                                        
+                                        if net_speculative > threshold:
+                                            bias = 'BULLISH'
+                                        elif net_speculative < -threshold:
+                                            bias = 'BEARISH'
+                                        else:
+                                            bias = 'NEUTRAL'
+                                        
+                                        cot_data[currency] = {
+                                            'non_commercial_long': nc_long,
+                                            'non_commercial_short': nc_short,
+                                            'commercial_long': c_long,
+                                            'commercial_short': c_short,
+                                            'net_speculative': net_speculative,
+                                            'net_commercial': net_commercial,
+                                            'bias': bias,
+                                            'source': 'CFTC'
+                                        }
+                                        
+                                    except ValueError:
+                                        continue
+                                break
                 
         except Exception as e:
             print(f"Errore COT CFTC: {e}")
@@ -432,55 +488,46 @@ class FreeDataProvider:
         return cot_data
     
     @staticmethod
-    def get_currency_strength() -> dict:
+    def get_gold_specific_data() -> dict:
         """
-        Calcola forza relativa delle valute
-        Basato su performance vs USD
+        Dati specifici per l'analisi dell'oro
         """
-        pairs_vs_usd = {
-            'EUR': 'EURUSD=X',
-            'GBP': 'GBPUSD=X',
-            'AUD': 'AUDUSD=X',
-            'NZD': 'NZDUSD=X',
-            'USD': None,
-            'JPY': 'USDJPY=X',
-            'CHF': 'USDCHF=X',
-            'CAD': 'USDCAD=X'
+        data = {
+            'dxy_correlation': None,  # Correlazione inversa con USD Index
+            'inflation_data': None,
+            'treasury_yields': None
         }
         
-        strength = {}
-        
-        for currency, pair in pairs_vs_usd.items():
-            if pair is None:
-                strength[currency] = {'change_1d': 0, 'change_1w': 0, 'score': 50}
-                continue
+        try:
+            # DXY (US Dollar Index) - correlazione inversa con oro
+            dxy = yf.Ticker("DX-Y.NYB")
+            dxy_hist = dxy.history(period="5d")
+            
+            if not dxy_hist.empty:
+                dxy_current = dxy_hist['Close'].iloc[-1]
+                dxy_change = ((dxy_hist['Close'].iloc[-1] / dxy_hist['Close'].iloc[0]) - 1) * 100
                 
-            try:
-                df = FreeDataProvider.get_forex_data(pair, period='7d', interval='1d')
+                data['dxy'] = {
+                    'current': round(dxy_current, 2),
+                    'change_5d': round(dxy_change, 2),
+                    'gold_impact': 'BULLISH' if dxy_change < 0 else 'BEARISH'  # Correlazione inversa
+                }
+            
+            # Treasury Yields (10Y) - correlazione inversa con oro
+            tny = yf.Ticker("^TNX")
+            tny_hist = tny.history(period="5d")
+            
+            if not tny_hist.empty:
+                yield_current = tny_hist['Close'].iloc[-1]
+                yield_change = tny_hist['Close'].iloc[-1] - tny_hist['Close'].iloc[0]
                 
-                if df is not None and len(df) >= 2:
-                    # Cambio 1 giorno
-                    change_1d = ((df['Close'].iloc[-1] / df['Close'].iloc[-2]) - 1) * 100
-                    
-                    # Cambio 1 settimana
-                    change_1w = ((df['Close'].iloc[-1] / df['Close'].iloc[0]) - 1) * 100
-                    
-                    # Per JPY, CHF, CAD il pair è invertito
-                    if currency in ['JPY', 'CHF', 'CAD']:
-                        change_1d = -change_1d
-                        change_1w = -change_1w
-                    
-                    # Score 0-100
-                    score = 50 + (change_1w * 10)
-                    score = max(0, min(100, score))
-                    
-                    strength[currency] = {
-                        'change_1d': round(change_1d, 2),
-                        'change_1w': round(change_1w, 2),
-                        'score': round(score, 1)
-                    }
-                    
-            except Exception as e:
-                strength[currency] = {'change_1d': 0, 'change_1w': 0, 'score': 50}
+                data['treasury_10y'] = {
+                    'current': round(yield_current, 2),
+                    'change_5d': round(yield_change, 2),
+                    'gold_impact': 'BULLISH' if yield_change < 0 else 'BEARISH'
+                }
+                
+        except Exception as e:
+            print(f"Errore dati oro specifici: {e}")
         
-        return strength
+        return data
