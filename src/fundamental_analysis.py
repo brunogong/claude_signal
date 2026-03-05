@@ -1,110 +1,152 @@
 """
-Analisi Fondamentale con Dati Reali
+Analisi Fondamentale
 """
+
 from datetime import datetime
-from .data_providers import (
-    ForexDataProvider, 
-    EconomicCalendarProvider
-)
+from .data_providers import FreeDataProvider
+
 
 class FundamentalAnalyzer:
-    """Classe per l'analisi fondamentale con dati reali"""
+    """Analizzatore fondamentale"""
     
     def __init__(self, pair: str):
-        self.pair = pair.replace("=X", "")
+        self.pair = pair.replace("=X", "").replace("/", "")
         self.base_currency = self.pair[:3]
         self.quote_currency = self.pair[3:6]
-        self._rates_cache = None
-        self._calendar_cache = None
         
-    def get_interest_rates(self) -> dict:
-        """Recupera tassi di interesse reali"""
-        if not self._rates_cache:
-            self._rates_cache = ForexDataProvider.get_central_bank_rates()
+    def get_interest_rate_analysis(self) -> dict:
+        """Analisi tassi di interesse"""
+        rates = FreeDataProvider.get_central_bank_rates()
         
-        rates = self._rates_cache
+        base_data = rates.get(self.base_currency, {'rate': 0, 'bank': 'Unknown', 'trend': 'unknown'})
+        quote_data = rates.get(self.quote_currency, {'rate': 0, 'bank': 'Unknown', 'trend': 'unknown'})
         
-        base_rate = rates.get(self.base_currency, {'rate': 0, 'bank': 'Unknown'})
-        quote_rate = rates.get(self.quote_currency, {'rate': 0, 'bank': 'Unknown'})
+        differential = base_data['rate'] - quote_data['rate']
         
-        differential = base_rate['rate'] - quote_rate['rate']
+        # Trend analysis
+        trend_score = 0
+        if base_data.get('trend') == 'hiking' and quote_data.get('trend') != 'hiking':
+            trend_score = 0.5
+        elif base_data.get('trend') == 'cutting' and quote_data.get('trend') != 'cutting':
+            trend_score = -0.5
+        elif quote_data.get('trend') == 'hiking' and base_data.get('trend') != 'hiking':
+            trend_score = -0.5
+        elif quote_data.get('trend') == 'cutting' and base_data.get('trend') != 'cutting':
+            trend_score = 0.5
         
         return {
             'base_currency': {
                 'currency': self.base_currency,
-                'rate': base_rate['rate'],
-                'bank': base_rate['bank']
+                'rate': base_data['rate'],
+                'bank': base_data['bank'],
+                'trend': base_data.get('trend', 'unknown'),
+                'next_meeting': base_data.get('next_meeting', 'N/A')
             },
             'quote_currency': {
                 'currency': self.quote_currency,
-                'rate': quote_rate['rate'],
-                'bank': quote_rate['bank']
+                'rate': quote_data['rate'],
+                'bank': quote_data['bank'],
+                'trend': quote_data.get('trend', 'unknown'),
+                'next_meeting': quote_data.get('next_meeting', 'N/A')
             },
-            'differential': differential,
-            'carry_trade_direction': 'LONG' if differential > 0 else 'SHORT',
-            'source': 'Central Banks Official Rates',
-            'note': 'Aggiornato quotidianamente'
+            'differential': round(differential, 2),
+            'trend_score': trend_score,
+            'carry_trade': 'FAVORABLE' if differential > 1 else ('UNFAVORABLE' if differential < -1 else 'NEUTRAL')
         }
     
-    def get_economic_calendar(self) -> list:
-        """Recupera calendario economico reale"""
-        if not self._calendar_cache:
-            # Prova prima Investing, poi Forex Factory
-            self._calendar_cache = EconomicCalendarProvider.get_calendar_from_investing()
-            
-            if not self._calendar_cache:
-                self._calendar_cache = EconomicCalendarProvider.get_calendar_from_forexfactory()
+    def get_economic_calendar_analysis(self) -> dict:
+        """Analisi calendario economico"""
+        calendar = FreeDataProvider.get_economic_calendar()
         
         # Filtra per valute rilevanti
-        relevant_currencies = [self.base_currency, self.quote_currency]
-        
-        filtered = [
-            e for e in self._calendar_cache 
-            if any(c in e.get('currency', '').upper() for c in relevant_currencies)
+        relevant = [
+            e for e in calendar
+            if self.base_currency in e.get('currency', '').upper() or 
+               self.quote_currency in e.get('currency', '').upper()
         ]
         
-        return filtered if filtered else self._calendar_cache[:5]
-    
-    def get_fundamental_score(self) -> dict:
-        """Calcola punteggio fondamentale con dati reali"""
-        rates = self.get_interest_rates()
-        calendar = self.get_economic_calendar()
+        # Conta impatti
+        high_impact = [e for e in relevant if e.get('impact') == 'High']
+        medium_impact = [e for e in relevant if e.get('impact') == 'Medium']
         
-        # Score basato su tassi di interesse
-        rate_score = 0
-        diff = rates['differential']
-        
-        if diff > 2:
-            rate_score = 1
-        elif diff > 1:
-            rate_score = 0.7
-        elif diff > 0:
-            rate_score = 0.3
-        elif diff > -1:
-            rate_score = -0.3
-        elif diff > -2:
-            rate_score = -0.7
+        # Risk assessment
+        if len(high_impact) >= 3:
+            event_risk = 'VERY HIGH'
+            risk_score = -0.3
+        elif len(high_impact) >= 1:
+            event_risk = 'HIGH'
+            risk_score = -0.15
+        elif len(medium_impact) >= 2:
+            event_risk = 'MODERATE'
+            risk_score = -0.05
         else:
-            rate_score = -1
-        
-        # Eventi ad alto impatto
-        high_impact = [e for e in calendar if e.get('impact') == 'High']
-        event_risk = 'HIGH' if len(high_impact) > 0 else 'LOW'
-        
-        # Aumenta incertezza se ci sono eventi importanti
-        uncertainty_factor = 0.2 if high_impact else 0
-        
-        final_score = rate_score * (1 - uncertainty_factor)
-        probability_bull = ((final_score + 1) / 2) * 100
+            event_risk = 'LOW'
+            risk_score = 0
         
         return {
-            'score': final_score,
-            'probability_bull': probability_bull,
-            'probability_bear': 100 - probability_bull,
-            'direction': 'BULLISH' if final_score > 0.1 else ('BEARISH' if final_score < -0.1 else 'NEUTRAL'),
-            'rate_analysis': rates,
-            'upcoming_events': calendar[:10],
-            'high_impact_events_today': len(high_impact),
+            'total_events': len(relevant),
+            'high_impact_count': len(high_impact),
+            'medium_impact_count': len(medium_impact),
             'event_risk': event_risk,
-            'data_source': 'Real-time from Central Banks & Economic Calendars'
+            'risk_score': risk_score,
+            'upcoming_events': relevant[:10]
+        }
+    
+    def get_fundamental_score(self) -> dict:
+        """Calcola punteggio fondamentale"""
+        rate_analysis = self.get_interest_rate_analysis()
+        calendar_analysis = self.get_economic_calendar_analysis()
+        
+        # Score da differential tassi
+        diff = rate_analysis['differential']
+        
+        if diff >= 3:
+            rate_score = 0.8
+        elif diff >= 2:
+            rate_score = 0.6
+        elif diff >= 1:
+            rate_score = 0.4
+        elif diff >= 0.5:
+            rate_score = 0.2
+        elif diff >= 0:
+            rate_score = 0
+        elif diff >= -0.5:
+            rate_score = -0.2
+        elif diff >= -1:
+            rate_score = -0.4
+        elif diff >= -2:
+            rate_score = -0.6
+        else:
+            rate_score = -0.8
+        
+        # Aggiungi trend score
+        rate_score += rate_analysis['trend_score'] * 0.3
+        
+        # Applica risk da eventi
+        final_score = rate_score + calendar_analysis['risk_score']
+        final_score = max(-1, min(1, final_score))
+        
+        # Probabilità
+        probability_bull = ((final_score + 1) / 2) * 100
+        
+        # Direzione
+        if final_score > 0.3:
+            direction = 'BULLISH'
+        elif final_score > 0.1:
+            direction = 'SLIGHTLY BULLISH'
+        elif final_score < -0.3:
+            direction = 'BEARISH'
+        elif final_score < -0.1:
+            direction = 'SLIGHTLY BEARISH'
+        else:
+            direction = 'NEUTRAL'
+        
+        return {
+            'score': round(final_score, 3),
+            'probability_bull': round(probability_bull, 1),
+            'probability_bear': round(100 - probability_bull, 1),
+            'direction': direction,
+            'rate_analysis': rate_analysis,
+            'calendar_analysis': calendar_analysis,
+            'data_source': 'Central Banks & Economic Calendar'
         }
